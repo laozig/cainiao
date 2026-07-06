@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>物流监控平台</title>
+<link rel="icon" href="/favicon.ico?v=202607061205" sizes="any">
+<link rel="stylesheet" href="style.css">
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
+</head>
+<body>
+<div class="app">
+  <div class="header">
+    <div class="header-logo"><svg viewBox="0 0 24 24"><path d="M20 8h-3V4H3c-1.1 0-2 .9-2 2v11h2c0 1.66 1.34 3 3 3s3-1.34 3-3h6c0 1.66 1.34 3 3 3s3-1.34 3-3h2v-5l-3-4zM6 18.5c-.83 0-1.5-.67-1.5-1.5s.67-1.5 1.5-1.5 1.5.67 1.5 1.5-.67 1.5-1.5 1.5zm13.5-9 1.96 2.5H17V9.5h2.5zm-1.5 9c-.83 0-1.5-.67-1.5-1.5s.67-1.5 1.5-1.5 1.5.67 1.5 1.5-.67 1.5-1.5 1.5z"/></svg></div>
+    <h1>物流监控平台</h1>
+    <span class="sub">菜鸟裹裹 &middot; 全快递自动识别 &middot; 代理轮换</span>
+    <div class="header-right">
+      <span class="last-sync-info" id="lastSyncInfo"></span>
+      <button class="theme-toggle" id="themeToggle" title="切换暗色模式"><svg id="themeIcon" viewBox="0 0 24 24"><path d="M12 3a9 9 0 1 0 9 9c0-.46-.04-.92-.1-1.36a5.389 5.389 0 0 1-4.4 2.26 5.403 5.403 0 0 1-3.14-9.8c-.44-.06-.9-.1-1.36-.1z"/></svg></button>
+    </div>
+  </div>
+
+  <div class="stats-row" id="statsRow"></div>
+
+  <div class="alert-row" id="alertRow">
+    <svg viewBox="0 0 24 24"><path d="M1 21h22L12 2 1 21zm12-3h-2v-2h2v2zm0-4h-2v-4h2v4z"/></svg>
+    <span class="alert-text" id="alertText"></span>
+    <span class="alert-close" id="alertClose">&times;</span>
+  </div>
+
+  <div class="settings-bar" id="settingsBar">
+    <label>代理API</label>
+    <input type="text" class="proxy-input" id="globalProxyApi" placeholder="代理提取API，留空不使用">
+    <span class="proxy-status" id="proxyStatus"></span>
+    <div class="settings-sep"></div>
+    <label>超时</label><input type="number" id="cfgTimeout" value="3" min="1" max="30">
+    <label>并发</label><input type="number" id="cfgConcurrency" value="5" min="1" max="20">
+    <div class="settings-sep"></div>
+    <label class="check-line"><input type="checkbox" id="autoSyncEnabled"> 自动同步</label>
+    <input type="number" id="autoSyncMinutes" value="30" min="5" max="1440" title="自动同步间隔，单位分钟">
+    <div class="settings-sep"></div>
+    <button class="btn btn-pri" id="btnSaveSettings">保存设置</button>
+  </div>
+
+  <div class="filter-bar">
+    <select id="filterStatus">
+      <option value="">全部状态</option>
+      <option value="0">无轨迹</option><option value="1">待揽收</option><option value="2">已揽收</option>
+      <option value="3">运输中</option><option value="4">派送中</option><option value="7">待取件</option><option value="5">已签收</option><option value="6">异常</option>
+    </select>
+    <span class="filter-sep">日期</span>
+    <input type="date" id="filterDateFrom"><span class="filter-sep">-</span><input type="date" id="filterDateTo">
+    <input type="text" id="filterSearch" placeholder="搜索单号...">
+    <select id="filterCarrier"><option value="">全部快递</option></select>
+    <select id="filterTag"><option value="">全部标签</option></select>
+    <button class="btn btn-pri" id="btnSearch">搜索</button>
+    <button class="btn" id="btnReset">重置</button>
+  </div>
+
+  <div class="toolbar">
+    <div class="toolbar-left">
+      <button class="btn btn-pri" id="btnImport"><svg viewBox="0 0 24 24"><path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"/></svg> 批量导入</button>
+      <button class="btn btn-ok" id="btnSyncSelected" disabled><svg viewBox="0 0 24 24"><path d="M12 4V1L8 5l4 4V6c3.31 0 6 2.69 6 6 0 1.01-.25 1.97-.7 2.8l1.46 1.46C19.54 15.03 20 13.57 20 12c0-4.42-3.58-8-8-8zm0 14c-3.31 0-6-2.69-6-6 0-1.01.25-1.97.7-2.8L5.24 7.74C4.46 8.97 4 10.43 4 12c0 4.42 3.58 8 8 8v3l4-4-4-4v3z"/></svg> 同步选中</button>
+      <button class="btn" id="btnSyncMonitor"><svg viewBox="0 0 24 24"><path d="M12 4V1L8 5l4 4V6c3.31 0 6 2.69 6 6 0 1.01-.25 1.97-.7 2.8l1.46 1.46C19.54 15.03 20 13.57 20 12c0-4.42-3.58-8-8-8zm0 14c-3.31 0-6-2.69-6-6 0-1.01.25-1.97.7-2.8L5.24 7.74C4.46 8.97 4 10.43 4 12c0 4.42 3.58 8 8 8v3l4-4-4-4v3z"/></svg> 同步全部</button>
+      <button class="btn" id="btnSyncNoTracking">同步无轨迹</button>
+      <button class="btn" id="btnSyncFailed">同步失败</button>
+      <button class="btn" id="btnSyncCurrent">同步当前筛选</button>
+      <button class="btn btn-danger hidden" id="btnStopSync">停止同步</button>
+      <button class="btn btn-danger" id="btnDeleteSelected" disabled><svg viewBox="0 0 24 24"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg> 批量删除</button>
+      <button class="btn btn-warn" id="btnBatchRemarks" disabled><svg viewBox="0 0 24 24"><path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04a1 1 0 0 0 0-1.41l-2.34-2.34a1 1 0 0 0-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/></svg> 批量备注</button>
+      <button class="btn" id="btnBatchTag" disabled style="color:var(--purple);border-color:var(--purple)"><svg viewBox="0 0 24 24"><path d="M17.63 5.84C17.27 5.33 16.67 5 16 5L5 5.01C3.9 5.01 3 5.9 3 7v10c0 1.1.9 1.99 2 1.99L16 19c.67 0 1.27-.33 1.63-.84L22 12l-4.37-6.16z"/></svg> 打标签</button>
+      <button class="btn" id="btnCopy"><svg viewBox="0 0 24 24"><path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/></svg> 复制单号</button>
+      <button class="btn" id="btnExport"><svg viewBox="0 0 24 24"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg> 导出</button>
+      <button class="btn" id="btnDashboard"><svg viewBox="0 0 24 24"><path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zM9 17H7v-7h2v7zm4 0h-2V7h2v10zm4 0h-2v-4h2v4z"/></svg> 仪表盘</button>
+      <button class="btn" id="btnLogs"><svg viewBox="0 0 24 24"><path d="M13 3c-4.97 0-9 4.03-9 9H1l3.89 3.89.07.14L9 12H6c0-3.87 3.13-7 7-7s7 3.13 7 7-3.13 7-7 7c-1.93 0-3.68-.79-4.94-2.06l-1.42 1.42A8.954 8.954 0 0 0 13 21c4.97 0 9-4.03 9-9s-4.03-9-9-9zm-1 5v5l4.28 2.54.72-1.21-3.5-2.08V8H12z"/></svg> 操作日志</button>
+      <button class="btn" id="btnBatchView">批次</button>
+      <button class="btn" id="btnColumns">列设置</button>
+    </div>
+    <div class="toolbar-right"><span class="selection-count" id="selectionCount"></span><button class="btn btn-clear-sel hidden" id="btnClearSel" style="font-size:10px;padding:2px 6px">清除选中</button></div>
+  </div>
+
+  <div class="sync-progress" id="syncProgress">
+    <div class="sync-hdr"><strong id="syncTitle">同步中...</strong><span id="syncTime">0s</span></div>
+    <div class="sync-bar"><div class="sync-bar-fill" id="syncBarFill"></div></div>
+    <div class="sync-stats">
+      <span>进度: <strong id="syncDone">0</strong>/<strong id="syncTotal">0</strong></span>
+      <span class="ok">成功: <strong id="syncOk">0</strong></span>
+      <span class="fail">失败: <strong id="syncFail">0</strong></span>
+    </div>
+    <div class="sync-error-stats" id="syncErrorStats"></div>
+    <div class="sync-log" id="syncLog"></div>
+  </div>
+
+  <div class="data-table">
+    <div class="table-head">
+      <div class="th col-select"><input type="checkbox" class="row-checkbox" id="checkAll"></div>
+      <div class="th col-num">#</div>
+      <div class="th col-no" data-sort="tracking_number">运单号</div>
+      <div class="th col-status" data-sort="status_code">物流状态</div>
+      <div class="th col-last-time" data-sort="last_track_time">最新轨迹时间</div>
+      <div class="th col-city" data-sort="current_city">当前城市</div>
+      <div class="th col-result">结果</div>
+      <div class="th col-carrier" data-sort="carrier_name">快递公司</div>
+      <div class="th col-remarks">备注</div>
+      <div class="th col-updated" data-sort="updated_at">最近同步</div>
+      <div class="th col-latest">最新轨迹</div>
+      <div class="th col-expand"></div>
+    </div>
+    <div id="tableBody"></div>
+  </div>
+
+  <div class="pagination" id="pagination"></div>
+</div>
+
+<div class="modal-overlay hidden" id="importModal">
+  <div class="modal">
+    <div class="modal-head"><span>批量导入运单</span><button class="modal-close" id="modalClose">&times;</button></div>
+    <div class="modal-body">
+      <textarea class="import-textarea" id="importInput" placeholder="每行一个运单号&#10;支持逗号、分号分隔"></textarea>
+      <div class="import-upload"><label><svg viewBox="0 0 24 24" style="width:12px;height:12px;fill:currentColor"><path d="M9 16h6v-6h4l-7-7-7 7h4zm-4 2h14v2H5z"/></svg> 上传TXT/CSV/XLSX<input type="file" accept=".txt,.csv,.xlsx,.xls" id="importFile" style="display:none"></label></div>
+      <div class="import-count" id="importCount">0 个单号</div>
+      <div class="import-row">
+        <div class="import-field"><label>快递编码</label><input type="text" id="importCpCode" placeholder="留空自动识别" style="width:120px"></div>
+      </div>
+      <div class="progress-section hidden" id="importProgress">
+        <div class="progress-bar"><div class="progress-fill" id="importProgressFill"></div></div>
+        <div class="progress-stats">
+          <span>进度: <strong id="importDone">0</strong>/<strong id="importTotal">0</strong></span>
+          <span class="ok">成功: <strong id="importOk">0</strong></span>
+          <span class="fail">失败: <strong id="importFail">0</strong></span>
+          <span>耗时: <strong id="importElapsed">0</strong>s</span>
+        </div>
+        <div class="import-failures hidden" id="importFailures">
+          <div class="import-failures-head">
+            <strong>失败单号</strong>
+            <div>
+              <button class="btn" id="copyImportFailures" type="button">复制失败项</button>
+              <button class="btn btn-pri" id="retryImportFailures" type="button">重新导入失败项</button>
+            </div>
+          </div>
+          <div class="import-failures-list" id="importFailuresList"></div>
+        </div>
+      </div>
+    </div>
+    <div class="modal-foot"><button class="btn" id="importCancel">取消</button><button class="btn btn-pri" id="importStart">开始导入</button></div>
+  </div>
+</div>
+
+<div class="modal-overlay hidden" id="batchRemarksModal">
+  <div class="modal" style="max-width:380px">
+    <div class="modal-head"><span>批量修改备注</span><button class="modal-close" id="batchRemarksClose">&times;</button></div>
+    <div class="modal-body">
+      <div style="font-size:11px;color:var(--text2);margin-bottom:6px">将对 <strong id="batchRemarksCount">0</strong> 条记录设置相同备注</div>
+      <textarea class="batch-remarks-input" id="batchRemarksInput" placeholder="输入备注内容..."></textarea>
+    </div>
+    <div class="modal-foot"><button class="btn" id="batchRemarksCancel">取消</button><button class="btn btn-pri" id="batchRemarksSave">保存</button></div>
+  </div>
+</div>
+
+<div class="modal-overlay hidden" id="batchTagModal">
+  <div class="modal" style="max-width:420px">
+    <div class="modal-head"><span>管理标签</span><button class="modal-close" id="batchTagClose">&times;</button></div>
+    <div class="modal-body">
+      <div style="font-size:11px;color:var(--text2);margin-bottom:6px">对 <strong id="batchTagCount">0</strong> 条记录操作标签</div>
+      <div style="margin-bottom:8px">
+        <div style="font-size:10px;color:var(--text2);margin-bottom:3px">已有标签（点击快速添加）:</div>
+        <div id="existingTags" style="display:flex;gap:4px;flex-wrap:wrap;min-height:20px"></div>
+      </div>
+      <div style="display:flex;gap:6px;align-items:center">
+        <input type="text" id="tagInput" placeholder="输入新标签名" style="flex:1;height:28px;border:1px solid var(--border);border-radius:4px;padding:0 6px;font-size:11px;background:var(--input-bg);color:var(--text)">
+        <button class="btn btn-pri" id="tagAddBtn" style="padding:4px 8px">添加</button>
+      </div>
+      <div id="tagSelectedList" style="margin-top:8px;display:flex;gap:4px;flex-wrap:wrap"></div>
+    </div>
+    <div class="modal-foot"><button class="btn" id="batchTagCancel">取消</button><button class="btn btn-pri" id="batchTagSave">保存</button></div>
+  </div>
+</div>
+
+<div class="modal-overlay hidden" id="batchViewModal">
+  <div class="modal" style="max-width:760px">
+    <div class="modal-head"><span>同步批次</span><button class="modal-close" id="batchViewClose">&times;</button></div>
+    <div class="modal-body"><div class="batch-list" id="batchViewList"></div></div>
+    <div class="modal-foot"><button class="btn" id="batchViewOk">关闭</button></div>
+  </div>
+</div>
+
+<div class="modal-overlay hidden" id="columnsModal">
+  <div class="modal" style="max-width:420px">
+    <div class="modal-head"><span>表格列设置</span><button class="modal-close" id="columnsClose">&times;</button></div>
+    <div class="modal-body"><div class="column-options" id="columnOptions"></div></div>
+    <div class="modal-foot"><button class="btn" id="columnsReset">恢复默认</button><button class="btn btn-pri" id="columnsOk">完成</button></div>
+  </div>
+</div>
+
+<div class="modal-overlay hidden" id="logModal">
+  <div class="modal" style="max-width:700px">
+    <div class="modal-head"><span>操作日志</span><button class="modal-close" id="logModalClose">&times;</button></div>
+    <div class="modal-body" style="max-height:400px;overflow-y:auto">
+      <table style="width:100%;font-size:11px;border-collapse:collapse" id="logTable">
+        <thead><tr style="border-bottom:1px solid var(--border)"><th style="text-align:left;padding:4px 6px;color:var(--text2)">时间</th><th style="text-align:left;padding:4px 6px;color:var(--text2)">操作</th><th style="text-align:left;padding:4px 6px;color:var(--text2)">详情</th><th style="text-align:right;padding:4px 6px;color:var(--text2)">数量</th></tr></thead>
+        <tbody id="logTableBody"></tbody>
+      </table>
+    </div>
+    <div class="modal-foot"><button class="btn" id="logModalOk">关闭</button></div>
+  </div>
+</div>
+
+<div class="modal-overlay hidden" id="dashboardModal">
+  <div class="modal" style="max-width:900px">
+    <div class="modal-head"><span>数据仪表盘</span><button class="modal-close" id="dashboardClose">&times;</button></div>
+    <div class="modal-body">
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
+        <div style="background:var(--sync-log-bg);border-radius:6px;padding:12px;border:1px solid var(--border)">
+          <div style="font-size:11px;color:var(--text2);margin-bottom:6px;font-weight:600">状态分布</div>
+          <canvas id="chartStatus" height="200"></canvas>
+        </div>
+        <div style="background:var(--sync-log-bg);border-radius:6px;padding:12px;border:1px solid var(--border)">
+          <div style="font-size:11px;color:var(--text2);margin-bottom:6px;font-weight:600">快递公司占比</div>
+          <canvas id="chartCarrier" height="200"></canvas>
+        </div>
+        <div style="grid-column:1/-1;background:var(--sync-log-bg);border-radius:6px;padding:12px;border:1px solid var(--border)">
+          <div style="font-size:11px;color:var(--text2);margin-bottom:6px;font-weight:600">每日导入趋势（近30天）</div>
+          <canvas id="chartDaily" height="140"></canvas>
+        </div>
+      </div>
+    </div>
+    <div class="modal-foot"><button class="btn" id="dashboardOk">关闭</button></div>
+  </div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>
+
