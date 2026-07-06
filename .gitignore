@@ -1,0 +1,42 @@
+# Runtime database files
+data/*.db
+data/*.sqlite
+data/*.sqlite3
+data/*.db-*
+data/*.sqlite-*
+data/*.sqlite3-*
+
+# Build outputs
+*.exe
+*.dll
+*.so
+*.dylib
+*.test
+bin/
+build/
+dist/
+out/
+
+# Logs and temporary files
+*.log
+logs/
+tmp/
+temp/
+*.tmp
+*.bak
+*.old
+
+# Go test/coverage artifacts
+coverage.out
+*.cover
+
+# Local environment/config
+.env
+.env.*
+!.env.example
+
+# Editor/OS noise
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

@@ -32,7 +32,7 @@ func md5Hash(s string) string {
 
 // strVal safely converts interface{} to string; nil → ""
 // BUG FIX: fmt.Sprintf("%v", nil) produces "<nil>" string,
-// but Node's `val || ''` naturally converts undefined → "".
+// but Node treats missing values as empty strings.
 func strVal(v interface{}) string {
 	if v == nil {
 		return ""
@@ -243,6 +243,9 @@ func doQuery(mailNo, cpCode, token, tkFull, tkEnc, cookieStr, proxyURL string, t
 // ── Parse result ───────────────────────────────────
 
 func parseResult(data map[string]interface{}) *ParsedResult {
+	if data == nil {
+		return nil
+	}
 	ret, _ := data["ret"].([]interface{})
 	success := false
 	for _, r := range ret {
@@ -255,12 +258,22 @@ func parseResult(data map[string]interface{}) *ParsedResult {
 		return nil
 	}
 
-	results, _ := data["data"].(map[string]interface{})["result"].([]interface{})
+	dataObj, ok := data["data"].(map[string]interface{})
+	if !ok {
+		return nil
+	}
+	results, ok := dataObj["result"].([]interface{})
+	if !ok {
+		return nil
+	}
 	if len(results) == 0 {
 		return nil
 	}
 
-	pkg, _ := results[0].(map[string]interface{})
+	pkg, ok := results[0].(map[string]interface{})
+	if !ok {
+		return nil
+	}
 	cp, _ := pkg["cp"].(map[string]interface{})
 	st, _ := pkg["packageStatus"].(map[string]interface{})
 	tracesRaw, _ := pkg["fullTraceDetail"].([]interface{})

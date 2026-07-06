@@ -6,6 +6,7 @@ function fmtT(t){if(!t)return'-';return t.replace(/^\d{4}-/,'').slice(0,14);}
 let _toastOffset=0;
 function toast(msg,type='info'){const el=document.createElement('div');el.className=`toast toast-${type}`;el.textContent=msg;el.style.top=(16+_toastOffset)+'px';_toastOffset+=44;document.body.appendChild(el);setTimeout(()=>{el.remove();_toastOffset=Math.max(0,_toastOffset-44);},3000);}
 function csvCell(v){const s=String(v??'');const pref=/^[=+\-@]/.test(s)?`'${s}`:s;return `"${pref.replace(/"/g,'""')}"`;}
+function arrayBufferToBase64(buf){const bytes=new Uint8Array(buf);let out='';for(let i=0;i<bytes.length;i+=0x8000){let chunk='';for(const b of bytes.subarray(i,i+0x8000))chunk+=String.fromCharCode(b);out+=chunk;}return btoa(out);}
 
 const COLUMN_DEFS=[
   ['select','34px','选择'],['num','38px','序号'],['no','170px','运单号'],['status','78px','物流状态'],
@@ -296,7 +297,7 @@ $('#btnBatchRemarks').addEventListener('click',()=>{const c=state.selectedIds.si
 $('#batchRemarksClose').addEventListener('click',()=>$('#batchRemarksModal').classList.add('hidden'));
 $('#batchRemarksCancel').addEventListener('click',()=>$('#batchRemarksModal').classList.add('hidden'));
 $('#batchRemarksSave').addEventListener('click',async()=>{const ids=[...state.selectedIds],r=$('#batchRemarksInput').value.trim();await api.batchRemarks(ids,r);$('#batchRemarksModal').classList.add('hidden');toast(`已更新${ids.length}条备注`,'ok');refreshData();});
-$('#btnExport').addEventListener('click',()=>{const p={page:1,pageSize:999999,...state.filters},q=new URLSearchParams();for(const[k,v]of Object.entries(p)){if(v!==''&&v!=null)q.set(k,v);}fetch('/api/records?'+q).then(r=>r.json()).then(data=>{const rows=data.records||[];if(!rows.length)return toast('无数据','err');const csv='\uFEFF'+['单号,状态,快递公司,当前城市,最新物流,最新时间,备注,同步时间',...rows.map(r=>[csvCell(r.tracking_number),csvCell(SL[r.status_code]||''),csvCell(r.carrier_name||''),csvCell(r.current_city||''),csvCell(r.last_track_desc||''),csvCell(r.last_track_time||''),csvCell(r.remarks||''),csvCell(r.updated_at||'')].join(','))].join('\n');const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([csv],{type:'text/csv;charset=utf-8'}));a.download=`logistics-${new Date().toISOString().slice(0,10)}.csv`;a.click();toast('已导出','ok');});});
+$('#btnExport').addEventListener('click',()=>{const p={...state.filters},q=new URLSearchParams();for(const[k,v]of Object.entries(p)){if(v!==''&&v!=null)q.set(k,v);}fetch('/api/export?'+q).then(r=>r.json()).then(data=>{const rows=data.records||[];if(!rows.length)return toast('无数据','err');const csv='\uFEFF'+['单号,状态,快递公司,当前城市,最新物流,最新时间,备注,同步时间',...rows.map(r=>[csvCell(r.tracking_number),csvCell(SL[r.status_code]||''),csvCell(r.carrier_name||''),csvCell(r.current_city||''),csvCell(r.last_track_desc||''),csvCell(r.last_track_time||''),csvCell(r.remarks||''),csvCell(r.updated_at||'')].join(','))].join('\n');const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([csv],{type:'text/csv;charset=utf-8'}));a.download=`logistics-${new Date().toISOString().slice(0,10)}.csv`;a.click();toast('已导出','ok');});});
 $('#btnCopy').addEventListener('click',async()=>{const ids=[...state.selectedIds],nums=ids.length?state.records.filter(r=>ids.includes(r.id)).map(r=>r.tracking_number):state.records.map(r=>r.tracking_number);if(!nums.length)return toast('无单号','err');await navigator.clipboard.writeText(nums.join('\n'));toast(`已复制${nums.length}个单号`,'ok');});
 
 // Import
@@ -315,7 +316,7 @@ $('#importCancel').addEventListener('click',()=>{if(state.importing&&state.impor
 $('#copyImportFailures').addEventListener('click',async()=>{const nums=state.importFailures.map(f=>f.mailNo).filter(Boolean);if(!nums.length)return toast('无失败单号','err');await navigator.clipboard.writeText(nums.join('\n'));toast(`已复制${nums.length}个失败单号`,'ok');});
 $('#retryImportFailures').addEventListener('click',()=>{const nums=state.importFailures.map(f=>f.mailNo).filter(Boolean);if(!nums.length)return toast('无失败单号','err');$('#importInput').value=nums.join('\n');updateImportCount();resetImportFailures();$('#importStart').click();});
 $('#importInput').addEventListener('input',updateImportCount);
-$('#importFile').addEventListener('change',e=>{const f=e.target.files[0];if(!f)return;const ext=f.name.split('.').pop().toLowerCase();if(ext==='xlsx'||ext==='xls'){const r=new FileReader();r.onload=async ev=>{try{const b64=btoa(String.fromCharCode(...new Uint8Array(ev.target.result)));const resp=await fetch('/api/parse-excel',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({data:b64})});const d=await resp.json();if(d.error){toast(d.error,'err');return;}$('#importInput').value=d.numbers.join('\n');updateImportCount();toast(`从Excel解析出${d.count}个单号`,'ok');}catch(err){toast('Excel解析失败','err');}};r.readAsArrayBuffer(f);}else{const r=new FileReader();r.onload=ev=>{$('#importInput').value=ev.target.result;updateImportCount();};r.readAsText(f,'UTF-8');}e.target.value='';});
+$('#importFile').addEventListener('change',e=>{const f=e.target.files[0];if(!f)return;const ext=f.name.split('.').pop().toLowerCase();if(ext==='xls'){toast('旧版XLS暂不支持，请另存为XLSX或CSV','err');e.target.value='';return;}if(ext==='xlsx'){const r=new FileReader();r.onload=async ev=>{try{const b64=arrayBufferToBase64(ev.target.result);const resp=await fetch('/api/parse-excel',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({data:b64})});const d=await resp.json();if(d.error){toast(d.error,'err');return;}$('#importInput').value=d.numbers.join('\n');updateImportCount();toast(`从Excel解析出${d.count}个单号`,'ok');}catch(err){toast('Excel解析失败','err');}};r.readAsArrayBuffer(f);}else{const r=new FileReader();r.onload=ev=>{$('#importInput').value=ev.target.result;updateImportCount();};r.readAsText(f,'UTF-8');}e.target.value='';});
 $('#importStart').addEventListener('click',async()=>{
   let nums=getImportNumbers();if(!nums.length)return toast('请输入单号','err');
   try{
@@ -482,8 +483,8 @@ $('#logModalOk').addEventListener('click',()=>$('#logModal').classList.add('hidd
 // Dashboard
 let _charts={};
 function destroyCharts(){for(const k of Object.keys(_charts)){if(_charts[k]){_charts[k].destroy();delete _charts[k];}}}
-const STATUS_COLORS=['#94a3b8','#7c3aed','#0891b2','#2563eb','#f59e0b','#64748b','#16a34a','#dc2626'];
-const STATUS_NAMES=['无轨迹','待揽收','已揽收','运输中','派送中','待取件','已签收','异常'];
+const STATUS_COLORS=['#94a3b8','#7c3aed','#0891b2','#2563eb','#f59e0b','#16a34a','#dc2626','#64748b'];
+const STATUS_NAMES=['无轨迹','待揽收','已揽收','运输中','派送中','已签收','异常','待取件'];
 
 $('#btnDashboard').addEventListener('click',async()=>{
   destroyCharts();
@@ -497,7 +498,7 @@ $('#btnDashboard').addEventListener('click',async()=>{
 
     _charts.status=new Chart($('#chartStatus'),{type:'doughnut',data:{labels:data.byStatus.map(s=>STATUS_NAMES[s.code]||'未知'),datasets:[{data:data.byStatus.map(s=>s.c),backgroundColor:data.byStatus.map(s=>STATUS_COLORS[s.code]||'#ccc'),borderWidth:0}]},options:{responsive:true,plugins:{legend:{position:'right',labels:{boxWidth:10,font:{size:10}}}}}});
 
-    _charts.carrier=new Chart($('#chartCarrier'),{type:'pie',data:{labels:data.byCarrier.map(c=>c.name),datasets:[{data:data.byCarrier.map(c=>c.c),backgroundColor:['#3b82f6','#8b5cf6','#06b6d4','#10b981','#f59e0b','#ef4444','#ec4899','#6366f1','#14b8a6','#f97316'],borderWidth:0}]},options:{responsive:true,plugins:{legend:{position:'right',labels:{boxWidth:10,font:{size:10}}}}}});
+    _charts.carrier=new Chart($('#chartCarrier'),{type:'pie',data:{labels:data.byCarrier.map(c=>c.carrier_name),datasets:[{data:data.byCarrier.map(c=>c.count),backgroundColor:['#3b82f6','#8b5cf6','#06b6d4','#10b981','#f59e0b','#ef4444','#ec4899','#6366f1','#14b8a6','#f97316'],borderWidth:0}]},options:{responsive:true,plugins:{legend:{position:'right',labels:{boxWidth:10,font:{size:10}}}}}});
 
     _charts.daily=new Chart($('#chartDaily'),{type:'bar',data:{labels:data.byDate.map(d=>d.d?d.d.slice(5):''),datasets:[{label:'导入量',data:data.byDate.map(d=>d.c),backgroundColor:isDark?'rgba(59,130,246,.5)':'rgba(37,99,235,.6)',borderRadius:3}]},options:{responsive:true,plugins:{legend:{display:false}},scales:{x:{grid:{display:false}},y:{beginAtZero:true,ticks:{stepSize:1}}}}});
   }catch{toast('加载仪表盘失败','err');}

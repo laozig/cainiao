@@ -1,9 +1,12 @@
 package main
 
 import (
+	"archive/zip"
+	"bytes"
 	"encoding/base64"
 	"encoding/csv"
 	"encoding/json"
+	"encoding/xml"
 	"fmt"
 	"io"
 	"net/http"
@@ -164,15 +167,7 @@ func handleGetRecords(w http.ResponseWriter, r *http.Request) {
 		pageSize = 20
 	}
 
-	var statusCode interface{}
-	scStr := q.Get("statusCode")
-	if scStr == "monitoring" {
-		statusCode = "monitoring"
-	} else if scStr != "" {
-		if n, err := strconv.Atoi(scStr); err == nil {
-			statusCode = n
-		}
-	}
+	statusCode := parseStatusCodeParam(q.Get("statusCode"))
 
 	result := getRecords(page, pageSize, statusCode,
 		q.Get("search"), q.Get("carrier"), q.Get("tag"),
@@ -180,6 +175,33 @@ func handleGetRecords(w http.ResponseWriter, r *http.Request) {
 		q.Get("dateFrom"), q.Get("dateTo"))
 
 	jsonMarshalResponse(w, result)
+}
+
+func handleExportRecords(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	limit, _ := strconv.Atoi(q.Get("limit"))
+	if limit < 1 || limit > 100000 {
+		limit = 100000
+	}
+
+	result := getRecords(1, limit, parseStatusCodeParam(q.Get("statusCode")),
+		q.Get("search"), q.Get("carrier"), q.Get("tag"),
+		q.Get("sort"), q.Get("order"),
+		q.Get("dateFrom"), q.Get("dateTo"))
+
+	jsonMarshalResponse(w, result)
+}
+
+func parseStatusCodeParam(scStr string) interface{} {
+	if scStr == "monitoring" {
+		return "monitoring"
+	}
+	if scStr != "" {
+		if n, err := strconv.Atoi(scStr); err == nil {
+			return n
+		}
+	}
+	return nil
 }
 
 // BUG FIX: Node returns 404 when record not found, Go was returning 200
@@ -319,6 +341,22 @@ func handleParseExcel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if bytes.HasPrefix(raw, []byte("PK\x03\x04")) {
+		numbers, err := parseXLSXTrackingNumbers(raw)
+		if err != nil {
+			w.WriteHeader(400)
+			jsonMarshalResponse(w, map[string]string{"error": "XLSX解析失败"})
+			return
+		}
+		jsonMarshalResponse(w, map[string]interface{}{"numbers": numbers, "count": len(numbers)})
+		return
+	}
+	if bytes.HasPrefix(raw, []byte{0xD0, 0xCF, 0x11, 0xE0}) {
+		w.WriteHeader(400)
+		jsonMarshalResponse(w, map[string]string{"error": "暂不支持旧版XLS，请另存为XLSX或CSV"})
+		return
+	}
+
 	seen := map[string]bool{}
 	var numbers []string
 
@@ -361,6 +399,197 @@ func handleParseExcel(w http.ResponseWriter, r *http.Request) {
 	}
 
 	jsonMarshalResponse(w, map[string]interface{}{"numbers": numbers, "count": len(numbers)})
+}
+
+func parseXLSXTrackingNumbers(raw []byte) ([]string, error) {
+	zr, err := zip.NewReader(bytes.NewReader(raw), int64(len(raw)))
+	if err != nil {
+		return nil, err
+	}
+
+	sharedStrings := parseXLSXSharedStrings(zr)
+	seen := map[string]bool{}
+	var numbers []string
+
+	for _, f := range zr.File {
+		if !strings.HasPrefix(f.Name, "xl/worksheets/") || !strings.HasSuffix(f.Name, ".xml") {
+			continue
+		}
+		values, err := parseXLSXWorksheetValues(f, sharedStrings)
+		if err != nil {
+			continue
+		}
+		for _, v := range values {
+			addTrackingCandidate(&numbers, seen, v)
+		}
+	}
+
+	if numbers == nil {
+		numbers = []string{}
+	}
+	return numbers, nil
+}
+
+func parseXLSXSharedStrings(zr *zip.Reader) []string {
+	for _, f := range zr.File {
+		if f.Name != "xl/sharedStrings.xml" {
+			continue
+		}
+		raw, err := readZipFile(f)
+		if err != nil {
+			return nil
+		}
+		return parseSharedStringsXML(raw)
+	}
+	return nil
+}
+
+func parseSharedStringsXML(raw []byte) []string {
+	decoder := xml.NewDecoder(bytes.NewReader(raw))
+	var values []string
+	var current strings.Builder
+	inSI := false
+	inText := false
+
+	for {
+		tok, err := decoder.Token()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return values
+		}
+
+		switch t := tok.(type) {
+		case xml.StartElement:
+			switch t.Name.Local {
+			case "si":
+				inSI = true
+				current.Reset()
+			case "t":
+				if inSI {
+					inText = true
+				}
+			}
+		case xml.CharData:
+			if inSI && inText {
+				current.Write([]byte(t))
+			}
+		case xml.EndElement:
+			switch t.Name.Local {
+			case "t":
+				inText = false
+			case "si":
+				values = append(values, current.String())
+				inSI = false
+			}
+		}
+	}
+	return values
+}
+
+func parseXLSXWorksheetValues(f *zip.File, sharedStrings []string) ([]string, error) {
+	raw, err := readZipFile(f)
+	if err != nil {
+		return nil, err
+	}
+
+	decoder := xml.NewDecoder(bytes.NewReader(raw))
+	var values []string
+	var rawValue, inlineValue strings.Builder
+	inCell := false
+	inValue := false
+	inText := false
+	cellType := ""
+
+	for {
+		tok, err := decoder.Token()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return values, err
+		}
+
+		switch t := tok.(type) {
+		case xml.StartElement:
+			switch t.Name.Local {
+			case "c":
+				inCell = true
+				cellType = ""
+				rawValue.Reset()
+				inlineValue.Reset()
+				for _, attr := range t.Attr {
+					if attr.Name.Local == "t" {
+						cellType = attr.Value
+						break
+					}
+				}
+			case "v":
+				if inCell {
+					inValue = true
+				}
+			case "t":
+				if inCell {
+					inText = true
+				}
+			}
+		case xml.CharData:
+			if inValue {
+				rawValue.Write([]byte(t))
+			}
+			if inText {
+				inlineValue.Write([]byte(t))
+			}
+		case xml.EndElement:
+			switch t.Name.Local {
+			case "v":
+				inValue = false
+			case "t":
+				inText = false
+			case "c":
+				text := xlsxCellText(cellType, rawValue.String(), inlineValue.String(), sharedStrings)
+				if strings.TrimSpace(text) != "" {
+					values = append(values, text)
+				}
+				inCell = false
+			}
+		}
+	}
+
+	return values, nil
+}
+
+func xlsxCellText(cellType, rawValue, inlineValue string, sharedStrings []string) string {
+	switch cellType {
+	case "s":
+		idx, err := strconv.Atoi(strings.TrimSpace(rawValue))
+		if err != nil || idx < 0 || idx >= len(sharedStrings) {
+			return ""
+		}
+		return sharedStrings[idx]
+	case "inlineStr":
+		return inlineValue
+	default:
+		return rawValue
+	}
+}
+
+func readZipFile(f *zip.File) ([]byte, error) {
+	rc, err := f.Open()
+	if err != nil {
+		return nil, err
+	}
+	defer rc.Close()
+	return io.ReadAll(rc)
+}
+
+func addTrackingCandidate(numbers *[]string, seen map[string]bool, v string) {
+	v = strings.TrimSpace(v)
+	if len(v) >= 5 && isTrackingNumber(v) && !seen[v] {
+		seen[v] = true
+		*numbers = append(*numbers, v)
+	}
 }
 
 func handleSync(w http.ResponseWriter, r *http.Request) {

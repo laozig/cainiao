@@ -25,9 +25,22 @@ type SSEEvent struct {
 	Elapsed string      `json:"elapsed,omitempty"`
 }
 
+type SSEBatchItem struct {
+	MailNo string
+	CpCode string
+}
+
 // ── SSE batch runner ────────────────────────────────
 
 func runSSEBatch(numbers []string, cpCode, proxyAPI string, timeoutSec, concurrency int, batchID string, w http.ResponseWriter, r *http.Request) {
+	items := make([]SSEBatchItem, 0, len(numbers))
+	for _, no := range numbers {
+		items = append(items, SSEBatchItem{MailNo: no, CpCode: cpCode})
+	}
+	runSSEBatchItems(items, proxyAPI, timeoutSec, concurrency, batchID, w, r)
+}
+
+func runSSEBatchItems(items []SSEBatchItem, proxyAPI string, timeoutSec, concurrency int, batchID string, w http.ResponseWriter, r *http.Request) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		http.Error(w, "streaming not supported", http.StatusInternalServerError)
@@ -46,7 +59,7 @@ func runSSEBatch(numbers []string, cpCode, proxyAPI string, timeoutSec, concurre
 	writeMu := &sync.Mutex{}
 
 	// send init
-	sendSSE(w, flusher, writeMu, SSEEvent{Type: "init", Total: len(numbers)})
+	sendSSE(w, flusher, writeMu, SSEEvent{Type: "init", Total: len(items)})
 
 	// track connection close — Node uses res.on('close') + res.on('error')
 	ctx := r.Context()
@@ -93,7 +106,7 @@ func runSSEBatch(numbers []string, cpCode, proxyAPI string, timeoutSec, concurre
 
 	// BUG FIX: Node staggers worker startup with sleep(i * 150ms)
 	// This prevents all workers from hitting the API at the same time
-	for i := 0; i < len(numbers); i++ {
+	for i := 0; i < len(items); i++ {
 		if atomic.LoadInt32(&closed) == 1 {
 			break
 		}
@@ -102,15 +115,16 @@ func runSSEBatch(numbers []string, cpCode, proxyAPI string, timeoutSec, concurre
 		}
 
 		idx := int(atomic.AddInt32(&nextIdx, 1)) - 1
-		if idx >= len(numbers) {
+		if idx >= len(items) {
 			break
 		}
-		no := strings.TrimSpace(numbers[idx])
+		item := items[idx]
+		no := strings.TrimSpace(item.MailNo)
 		if no == "" {
 			continue
 		}
 
-		effectiveCp := cpCode
+		effectiveCp := strings.TrimSpace(item.CpCode)
 		if effectiveCp == "" {
 			effectiveCp = detectCarrier(no)
 		}
@@ -138,7 +152,7 @@ func runSSEBatch(numbers []string, cpCode, proxyAPI string, timeoutSec, concurre
 				upsertFailed(no, err.Error(), batchID)
 				sendSSE(w, flusher, writeMu, SSEEvent{
 					Type: "error", Index: idx, MailNo: no, Error: err.Error(),
-					OK: int(o), Fail: int(fail), Total: len(numbers),
+					OK: int(o), Fail: int(fail), Total: len(items),
 				})
 				return
 			}
@@ -150,7 +164,7 @@ func runSSEBatch(numbers []string, cpCode, proxyAPI string, timeoutSec, concurre
 				upsertShipment(*info, batchID)
 				sendSSE(w, flusher, writeMu, SSEEvent{
 					Type: "result", Index: idx, MailNo: no, Data: info,
-					OK: int(o), Fail: int(fail), Total: len(numbers),
+					OK: int(o), Fail: int(fail), Total: len(items),
 				})
 			} else {
 				fail := atomic.AddInt32(&failCount, 1)
@@ -158,7 +172,7 @@ func runSSEBatch(numbers []string, cpCode, proxyAPI string, timeoutSec, concurre
 				upsertFailed(no, "无物流数据", batchID)
 				sendSSE(w, flusher, writeMu, SSEEvent{
 					Type: "error", Index: idx, MailNo: no, Error: "无物流数据",
-					OK: int(o), Fail: int(fail), Total: len(numbers),
+					OK: int(o), Fail: int(fail), Total: len(items),
 				})
 			}
 		}(idx, no, effectiveCp)
@@ -173,10 +187,10 @@ func runSSEBatch(numbers []string, cpCode, proxyAPI string, timeoutSec, concurre
 	wg.Wait()
 
 	elapsed := time.Since(t0).Seconds()
-	addLog("batch", fmt.Sprintf("%s: 成功%d/失败%d/共%d", batchID, okCount, failCount, len(numbers)), int(okCount))
+	addLog("batch", fmt.Sprintf("%s: 成功%d/失败%d/共%d", batchID, okCount, failCount, len(items)), int(okCount))
 	sendSSE(w, flusher, writeMu, SSEEvent{
 		Type: "complete", OK: int(okCount), Fail: int(failCount),
-		Total: len(numbers), Elapsed: fmt.Sprintf("%.1f", elapsed),
+		Total: len(items), Elapsed: fmt.Sprintf("%.1f", elapsed),
 	})
 
 	// Signal heartbeat to stop and wait for it
@@ -206,14 +220,17 @@ func runSSEBatchFromRecords(recs []Shipment, batchPrefix, proxyAPI string, timeo
 		return
 	}
 
-	numbers := make([]string, 0, len(recs))
+	items := make([]SSEBatchItem, 0, len(recs))
 	for _, rec := range recs {
 		no := strings.TrimSpace(rec.TrackingNumber)
 		if no != "" {
-			numbers = append(numbers, no)
+			items = append(items, SSEBatchItem{
+				MailNo: no,
+				CpCode: strings.TrimSpace(rec.CarrierCode),
+			})
 		}
 	}
-	if len(numbers) == 0 {
+	if len(items) == 0 {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(400)
 		jsonMarshalResponse(w, map[string]string{"error": "无有效记录"})
@@ -224,7 +241,7 @@ func runSSEBatchFromRecords(recs []Shipment, batchPrefix, proxyAPI string, timeo
 		batchPrefix = "sync"
 	}
 	batchID := batchPrefix + "-" + time.Now().Format("2006-01-02T15-04-05")
-	runSSEBatch(numbers, "", proxyAPI, timeoutSec, concurrency, batchID, w, r)
+	runSSEBatchItems(items, proxyAPI, timeoutSec, concurrency, batchID, w, r)
 }
 
 func runSSEBatchFromIDs(ids []int64, proxyAPI string, timeoutSec, concurrency int, w http.ResponseWriter, r *http.Request) {

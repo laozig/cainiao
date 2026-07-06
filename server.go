@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"strings"
@@ -15,7 +16,7 @@ import (
 	"time"
 )
 
-//go:embed public
+//go:embed public/index.html public/app.js public/style.css public/favicon.ico
 var embeddedPublic embed.FS
 
 // ── JSON marshal helper (shared across packages) ────
@@ -68,6 +69,7 @@ func main() {
 
 	mux.HandleFunc("/api/records", recordsRouter())
 	mux.HandleFunc("/api/records/", recordsDetailRouter())
+	mux.HandleFunc("/api/export", getOnly(handleExportRecords))
 
 	mux.HandleFunc("/api/stats", getOnly(handleGetStats))
 	mux.HandleFunc("/api/carriers", getOnly(handleGetCarriers))
@@ -92,8 +94,8 @@ func main() {
 
 	// ── Start server with graceful shutdown ─────────
 	port := getSetting("port", "3456")
-	addr := ":" + port
-	log.Printf("物流监控平台已启动: http://localhost%s", addr)
+	addr := "127.0.0.1:" + port
+	log.Printf("物流监控平台已启动: http://localhost:%s", port)
 	server := &http.Server{
 		Addr:         addr,
 		Handler:      handler,
@@ -123,14 +125,16 @@ func applyMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 
-		// OPT #5: CORS - restrict to localhost in production
-		allowedOrigin := "*"
 		if origin := r.Header.Get("Origin"); origin != "" {
-			if strings.HasPrefix(origin, "http://localhost") || strings.HasPrefix(origin, "http://127.0.0.1") {
-				allowedOrigin = origin
+			if !isAllowedLocalOrigin(origin) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(403)
+				jsonMarshalResponse(w, map[string]string{"error": "origin not allowed"})
+				return
 			}
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Set("Vary", "Origin")
 		}
-		w.Header().Set("Access-Control-Allow-Origin", allowedOrigin)
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
 
@@ -186,6 +190,22 @@ func applyMiddleware(next http.Handler) http.Handler {
 }
 
 // ── Static and gzip helpers ─────────────────────────
+
+func isAllowedLocalOrigin(origin string) bool {
+	u, err := url.Parse(origin)
+	if err != nil {
+		return false
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return false
+	}
+	switch strings.ToLower(u.Hostname()) {
+	case "localhost", "127.0.0.1", "::1":
+		return true
+	default:
+		return false
+	}
+}
 
 func cacheStatic(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
