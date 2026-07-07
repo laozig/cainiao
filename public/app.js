@@ -301,8 +301,19 @@ $('#btnExport').addEventListener('click',()=>{const p={...state.filters},q=new U
 $('#btnCopy').addEventListener('click',async()=>{const ids=[...state.selectedIds],nums=ids.length?state.records.filter(r=>ids.includes(r.id)).map(r=>r.tracking_number):state.records.map(r=>r.tracking_number);if(!nums.length)return toast('无单号','err');await navigator.clipboard.writeText(nums.join('\n'));toast(`已复制${nums.length}个单号`,'ok');});
 
 // Import
-function getImportNumbers(){return($('#importInput').value||'').split(/[\n,;]+/).map(s=>s.trim()).filter(s=>s.length>=5);}
-function updateImportCount(){$('#importCount').textContent=`${getImportNumbers().length} 个单号`;}
+function parseImportInput(){
+  const raw=($('#importInput').value||'').split(/[\n,;]+/).map(s=>s.trim());
+  const seen=new Set(),numbers=[],duplicates=[],invalid=[];
+  for(const no of raw){
+    if(!no)continue;
+    if(no.length<5){invalid.push(no);continue;}
+    if(seen.has(no)){duplicates.push(no);continue;}
+    seen.add(no);numbers.push(no);
+  }
+  return{numbers,duplicates,invalid};
+}
+function getImportNumbers(){return parseImportInput().numbers;}
+function updateImportCount(){const p=parseImportInput();let text=`${p.numbers.length} 个单号`;const extra=[];if(p.duplicates.length)extra.push(`重复${p.duplicates.length}`);if(p.invalid.length)extra.push(`无效${p.invalid.length}`);if(extra.length)text+=`（已排除${extra.join('，')}）`;$('#importCount').textContent=text;}
 function resetImportFailures(){state.importFailures=[];$('#importFailures').classList.add('hidden');$('#importFailuresList').innerHTML='';}
 function renderImportFailures(){
   const box=$('#importFailures'),list=$('#importFailuresList');

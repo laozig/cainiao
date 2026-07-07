@@ -178,6 +178,8 @@ func initDB() {
 	if err != nil {
 		panic("open db: " + err.Error())
 	}
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
 
 	schema := `
 	CREATE TABLE IF NOT EXISTS shipments (
@@ -284,7 +286,7 @@ func normalizeStatusCode(status string) int {
 
 // ── Upsert ─────────────────────────────────────────
 
-func upsertShipment(p ParsedResult, batchID string) {
+func upsertShipment(p ParsedResult, batchID string) error {
 	sc := normalizeStatusCode(p.Status)
 	if sc == 0 && p.StatusDesc != "" {
 		sc = normalizeStatusCode(p.StatusDesc)
@@ -302,43 +304,44 @@ func upsertShipment(p ParsedResult, batchID string) {
 
 	resultJSON := toJSON(p)
 
-	// UPDATE first, INSERT if 0 rows affected (avoids SELECT-then-UPDATE race)
-	q := `UPDATE shipments SET
-		carrier_code=?, carrier_name=?, status=?, status_code=?, status_desc=?,
-		last_track_time=?, last_track_desc=?, current_city=?, from_city=?,
-		predict=?, progress=?, trace_count=?, result_json=?,
-		batch_id=CASE WHEN ?!='' THEN ? ELSE batch_id END,
-		request_count=request_count+1, error_msg='', updated_at=datetime('now','localtime')
-		WHERE tracking_number=?`
-	result, err := mustExecErr(q, p.CpCode, p.CpName, p.Status, sc, p.StatusDesc,
+	q := `INSERT INTO shipments (tracking_number, carrier_code, carrier_name, status, status_code, status_desc,
+		last_track_time, last_track_desc, current_city, from_city, predict, progress, trace_count,
+		result_json, batch_id, request_count, error_msg)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, '')
+		ON CONFLICT(tracking_number) DO UPDATE SET
+		carrier_code=excluded.carrier_code,
+		carrier_name=excluded.carrier_name,
+		status=excluded.status,
+		status_code=excluded.status_code,
+		status_desc=excluded.status_desc,
+		last_track_time=excluded.last_track_time,
+		last_track_desc=excluded.last_track_desc,
+		current_city=excluded.current_city,
+		from_city=excluded.from_city,
+		predict=excluded.predict,
+		progress=excluded.progress,
+		trace_count=excluded.trace_count,
+		result_json=excluded.result_json,
+		batch_id=CASE WHEN excluded.batch_id!='' THEN excluded.batch_id ELSE shipments.batch_id END,
+		request_count=shipments.request_count+1,
+		error_msg='',
+		updated_at=datetime('now','localtime')`
+	_, err := mustExecErr(q, p.MailNo, p.CpCode, p.CpName, p.Status, sc, p.StatusDesc,
 		p.LastTime, p.LastDesc, p.Current, p.From,
-		p.Predict, p.Progress, p.TraceCount, resultJSON,
-		batchID, batchID, p.MailNo)
-	if err == nil {
-		if rows, _ := result.RowsAffected(); rows == 0 {
-			qi := `INSERT INTO shipments (tracking_number, carrier_code, carrier_name, status, status_code, status_desc,
-				last_track_time, last_track_desc, current_city, from_city, predict, progress, trace_count,
-				result_json, batch_id, request_count, error_msg)
-				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, '')`
-			mustExec(qi, p.MailNo, p.CpCode, p.CpName, p.Status, sc, p.StatusDesc,
-				p.LastTime, p.LastDesc, p.Current, p.From,
-				p.Predict, p.Progress, p.TraceCount, resultJSON, batchID)
-		}
-	}
+		p.Predict, p.Progress, p.TraceCount, resultJSON, batchID)
+	return err
 }
 
-func upsertFailed(trackingNumber, errorMsg, batchID string) {
-	// UPDATE first, INSERT if 0 rows affected
-	q := `UPDATE shipments SET error_msg=?, request_count=request_count+1,
-		batch_id=CASE WHEN ?!='' THEN ? ELSE batch_id END,
-		updated_at=datetime('now','localtime') WHERE tracking_number=?`
-	result, err := mustExecErr(q, errorMsg, batchID, batchID, trackingNumber)
-	if err == nil {
-		if rows, _ := result.RowsAffected(); rows == 0 {
-			mustExec("INSERT INTO shipments (tracking_number, status_code, error_msg, batch_id, request_count) VALUES (?, 0, ?, ?, 1)",
-				trackingNumber, errorMsg, batchID)
-		}
-	}
+func upsertFailed(trackingNumber, errorMsg, batchID string) error {
+	q := `INSERT INTO shipments (tracking_number, status_code, error_msg, batch_id, request_count)
+		VALUES (?, 0, ?, ?, 1)
+		ON CONFLICT(tracking_number) DO UPDATE SET
+		error_msg=excluded.error_msg,
+		batch_id=CASE WHEN excluded.batch_id!='' THEN excluded.batch_id ELSE shipments.batch_id END,
+		request_count=shipments.request_count+1,
+		updated_at=datetime('now','localtime')`
+	_, err := mustExecErr(q, trackingNumber, errorMsg, batchID)
+	return err
 }
 
 // ── Records query ──────────────────────────────────
@@ -726,6 +729,10 @@ func recalcAllStatus() int {
 	limit := 500
 	lastID := 0
 	updated := 0
+	type statusRecalcRow struct {
+		id         int64
+		resultJSON string
+	}
 
 	for {
 		rows, err := db.Query("SELECT id, result_json FROM shipments WHERE id > ? AND result_json != '{}' ORDER BY id ASC LIMIT ?", lastID, limit)
@@ -733,15 +740,19 @@ func recalcAllStatus() int {
 			break
 		}
 
-		count := 0
+		recalcRows := make([]statusRecalcRow, 0, limit)
 		for rows.Next() {
 			var id int64
 			var resultJSON string
 			rows.Scan(&id, &resultJSON)
-			count++
+			recalcRows = append(recalcRows, statusRecalcRow{id: id, resultJSON: resultJSON})
+			lastID = int(id)
+		}
+		rows.Close()
 
+		for _, row := range recalcRows {
 			var p ParsedResult
-			if err := jsonUnmarshal([]byte(resultJSON), &p); err != nil {
+			if err := jsonUnmarshal([]byte(row.resultJSON), &p); err != nil {
 				continue
 			}
 
@@ -760,13 +771,11 @@ func recalcAllStatus() int {
 				sc = 5
 			}
 
-			mustExec("UPDATE shipments SET status_code = ? WHERE id = ?", sc, id)
+			mustExec("UPDATE shipments SET status_code = ? WHERE id = ?", sc, row.id)
 			updated++
-			lastID = int(id)
 		}
-		rows.Close()
 
-		if count < limit {
+		if len(recalcRows) < limit {
 			break
 		}
 	}

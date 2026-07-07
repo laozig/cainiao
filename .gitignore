@@ -27,6 +27,7 @@ temp/
 *.old
 
 # Go test/coverage artifacts
+.gocache/
 coverage.out
 *.cover
 

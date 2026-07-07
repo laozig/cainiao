@@ -71,6 +71,7 @@ func runSSEBatchItems(items []SSEBatchItem, proxyAPI string, timeoutSec, concurr
 	if proxyAPI != "" {
 		maxRetries = 8
 	}
+	seen := map[string]bool{}
 
 	// heartbeat — matches Node's setInterval(20000)
 	heartbeatDone := make(chan struct{})
@@ -121,8 +122,24 @@ func runSSEBatchItems(items []SSEBatchItem, proxyAPI string, timeoutSec, concurr
 		item := items[idx]
 		no := strings.TrimSpace(item.MailNo)
 		if no == "" {
+			fail := atomic.AddInt32(&failCount, 1)
+			o := atomic.LoadInt32(&okCount)
+			sendSSE(w, flusher, writeMu, SSEEvent{
+				Type: "error", Index: idx, MailNo: no, Error: "空单号，已跳过",
+				OK: int(o), Fail: int(fail), Total: len(items),
+			})
 			continue
 		}
+		if seen[no] {
+			fail := atomic.AddInt32(&failCount, 1)
+			o := atomic.LoadInt32(&okCount)
+			sendSSE(w, flusher, writeMu, SSEEvent{
+				Type: "error", Index: idx, MailNo: no, Error: "批次内重复单号，已跳过",
+				OK: int(o), Fail: int(fail), Total: len(items),
+			})
+			continue
+		}
+		seen[no] = true
 
 		effectiveCp := strings.TrimSpace(item.CpCode)
 		if effectiveCp == "" {
@@ -147,11 +164,14 @@ func runSSEBatchItems(items []SSEBatchItem, proxyAPI string, timeoutSec, concurr
 					atomic.StoreInt32(&closed, 1)
 					return
 				}
+				eventErr := err.Error()
+				if saveErr := upsertFailed(no, eventErr, batchID); saveErr != nil {
+					eventErr = "保存失败记录失败: " + saveErr.Error() + "；原始错误: " + err.Error()
+				}
 				fail := atomic.AddInt32(&failCount, 1)
 				o := atomic.LoadInt32(&okCount)
-				upsertFailed(no, err.Error(), batchID)
 				sendSSE(w, flusher, writeMu, SSEEvent{
-					Type: "error", Index: idx, MailNo: no, Error: err.Error(),
+					Type: "error", Index: idx, MailNo: no, Error: eventErr,
 					OK: int(o), Fail: int(fail), Total: len(items),
 				})
 				return
@@ -159,19 +179,31 @@ func runSSEBatchItems(items []SSEBatchItem, proxyAPI string, timeoutSec, concurr
 
 			info := parseResult(result)
 			if info != nil {
+				info.MailNo = no
+				if err := upsertShipment(*info, batchID); err != nil {
+					fail := atomic.AddInt32(&failCount, 1)
+					o := atomic.LoadInt32(&okCount)
+					sendSSE(w, flusher, writeMu, SSEEvent{
+						Type: "error", Index: idx, MailNo: no, Error: "保存记录失败: " + err.Error(),
+						OK: int(o), Fail: int(fail), Total: len(items),
+					})
+					return
+				}
 				o := atomic.AddInt32(&okCount, 1)
 				fail := atomic.LoadInt32(&failCount)
-				upsertShipment(*info, batchID)
 				sendSSE(w, flusher, writeMu, SSEEvent{
 					Type: "result", Index: idx, MailNo: no, Data: info,
 					OK: int(o), Fail: int(fail), Total: len(items),
 				})
 			} else {
+				eventErr := "无物流数据"
+				if saveErr := upsertFailed(no, eventErr, batchID); saveErr != nil {
+					eventErr = "保存失败记录失败: " + saveErr.Error() + "；原始错误: 无物流数据"
+				}
 				fail := atomic.AddInt32(&failCount, 1)
 				o := atomic.LoadInt32(&okCount)
-				upsertFailed(no, "无物流数据", batchID)
 				sendSSE(w, flusher, writeMu, SSEEvent{
-					Type: "error", Index: idx, MailNo: no, Error: "无物流数据",
+					Type: "error", Index: idx, MailNo: no, Error: eventErr,
 					OK: int(o), Fail: int(fail), Total: len(items),
 				})
 			}

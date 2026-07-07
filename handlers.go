@@ -117,7 +117,10 @@ func handleQuery(w http.ResponseWriter, r *http.Request) {
 	}
 	info := parseResult(result)
 	if info != nil {
-		upsertShipment(*info, "")
+		if err := upsertShipment(*info, ""); err != nil {
+			jsonMarshalResponse(w, map[string]interface{}{"success": false, "error": "保存记录失败: " + err.Error()})
+			return
+		}
 	}
 	jsonMarshalResponse(w, map[string]interface{}{"success": true, "data": info})
 }
