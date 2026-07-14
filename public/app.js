@@ -46,20 +46,23 @@ const api={
 // Settings
 async function loadSettings(){
   try{const s=await api.getSettings();state.settings=s||state.settings;}catch{}
+  state.settings.timeout=3;
   $('#globalProxyApi').value=state.settings.proxyApi||'';
-  $('#cfgTimeout').value=state.settings.timeout||3;
+  $('#cfgTimeout').value=3;
   $('#cfgConcurrency').value=state.settings.concurrency||5;
-  $('#proxyStatus').textContent=state.settings.proxyApi?'已启用':'';
+  $('#proxyStatus').textContent=state.settings.proxyApi?'已启用':'必须设置';
   $('#autoSyncEnabled').checked=!!state.autoSync.enabled;
   $('#autoSyncMinutes').value=state.autoSync.minutes||30;
 }
 async function saveSettings(){
-  const s={proxyApi:$('#globalProxyApi').value.trim(),timeout:Number($('#cfgTimeout').value)||3,concurrency:Number($('#cfgConcurrency').value)||5};
+  const proxyApi=$('#globalProxyApi').value.trim();
+  if(!proxyApi)return toast('代理API不能为空','err');
+  const s={proxyApi,timeout:3,concurrency:Number($('#cfgConcurrency').value)||5};
   state.autoSync.enabled=$('#autoSyncEnabled').checked;
   state.autoSync.minutes=Math.max(5,Math.min(1440,Number($('#autoSyncMinutes').value)||30));
   localStorage.setItem(AUTO_SYNC_KEY,JSON.stringify({enabled:state.autoSync.enabled,minutes:state.autoSync.minutes}));
   scheduleAutoSync();
-  try{const r=await api.updateSettings(s);state.settings=r.settings||s;$('#proxyStatus').textContent=state.settings.proxyApi?'已启用':'';toast('设置已保存','ok');}catch(e){toast('保存失败','err');}
+  try{const r=await api.updateSettings(s);if(r.error)return toast(r.error,'err');state.settings=r.settings||s;state.settings.timeout=3;$('#proxyStatus').textContent='已启用';toast('设置已保存','ok');}catch(e){toast('保存失败','err');}
 }
 $('#btnSaveSettings').addEventListener('click',saveSettings);
 
@@ -350,12 +353,13 @@ $('#importStart').addEventListener('click',async()=>{
   $('#importDone').textContent='0';$('#importTotal').textContent=nums.length;$('#importOk').textContent='0';$('#importFail').textContent='0';$('#importElapsed').textContent='0';$('#importProgressFill').style.width='0%';
   const t0=Date.now(),timer=setInterval(()=>{$('#importElapsed').textContent=((Date.now()-t0)/1000).toFixed(0);},500);
   try{
-    const resp=await fetch('/api/import',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({numbers:nums,cpCode:$('#importCpCode').value.trim(),timeout:state.settings.timeout,concurrency:state.settings.concurrency}),signal:state.importAbort.signal});
+    const resp=await fetch('/api/import',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({numbers:nums,cpCode:$('#importCpCode').value.trim(),tags:$('#importTags').value.trim(),remarks:$('#importRemarks').value.trim(),proxyApi:state.settings.proxyApi||'',timeout:3,concurrency:state.settings.concurrency}),signal:state.importAbort.signal});
+    if(!resp.ok){const d=await resp.json().catch(()=>({}));throw new Error(d.error||`HTTP ${resp.status}`);}
     const reader=resp.body.getReader(),dec=new TextDecoder();let buf='';
     while(true){const{done,value}=await reader.read();if(done)break;buf+=dec.decode(value,{stream:true});const lines=buf.split('\n');buf=lines.pop();
       for(const line of lines){if(!line.startsWith('data: '))continue;try{const d=JSON.parse(line.slice(6));if(d.type==='result'||d.type==='error'){const dn=(d.ok||0)+(d.fail||0);$('#importDone').textContent=dn;$('#importOk').textContent=d.ok||0;$('#importFail').textContent=d.fail||0;$('#importProgressFill').style.width=`${(dn/nums.length*100).toFixed(1)}%`;if(d.type==='error'){state.importFailures.push({mailNo:d.mailNo,error:d.error});renderImportFailures();}}if(d.type==='complete'){$('#importProgressFill').style.width='100%';toast(`导入完成: ${d.ok}成功 ${d.fail}失败 ${d.elapsed}秒`,'ok');renderImportFailures();}}catch{}}
     }
-  }catch(e){if(e.name!=='AbortError')toast('导入失败','err');}
+  }catch(e){if(e.name!=='AbortError')toast(`导入失败: ${e.message||'未知错误'}`,'err');}
   clearInterval(timer);state.importing=false;updateSyncButtons();$('#importStart').textContent='开始导入';$('#importStart').disabled=false;refreshData({meta:true});
 });
 
@@ -364,7 +368,7 @@ function showSync(title){state.syncing=true;state.syncErrors={};updateSyncButton
 function addLog(msg,type=''){const log=$('#syncLog'),div=document.createElement('div');div.className=`sync-log-item ${type}`;div.textContent=msg;log.appendChild(div);log.scrollTop=log.scrollHeight;}
 function classifySyncError(msg=''){if(msg.includes('取代理失败'))return'代理提取失败';if(msg.includes('取token失败'))return'token获取失败';if(msg.includes('token'))return'token无效';if(msg.includes('限流')||msg.includes('RGV587'))return'接口限流';if(msg.includes('无物流数据'))return'无物流数据';if(msg.includes('已取消'))return'已取消';return'其他错误';}
 function renderSyncErrorStats(){const entries=Object.entries(state.syncErrors);$('#syncErrorStats').innerHTML=entries.length?entries.map(([k,v])=>`<span>${esc(k)}: <strong>${v}</strong></span>`).join(''):'';}
-function syncBody(extra={}){return{timeout:state.settings.timeout,concurrency:state.settings.concurrency,proxyApi:state.settings.proxyApi||'',...extra};}
+function syncBody(extra={}){return{timeout:3,concurrency:state.settings.concurrency,proxyApi:state.settings.proxyApi||'',...extra};}
 function currentFilterBody(mode='current'){return syncBody({mode,statusCode:String(state.filters.statusCode||''),search:state.filters.search||'',carrier:state.filters.carrier||'',tag:state.filters.tag||'',dateFrom:state.filters.dateFrom||'',dateTo:state.filters.dateTo||''});}
 function pushBatch(title,ok,fail,total,elapsed,aborted){state.syncBatches.unshift({title,ok,fail,total,elapsed,aborted,time:new Date().toLocaleString('zh-CN',{hour12:false}),errors:{...state.syncErrors}});state.syncBatches=state.syncBatches.slice(0,50);}
 

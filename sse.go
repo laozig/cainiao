@@ -26,16 +26,18 @@ type SSEEvent struct {
 }
 
 type SSEBatchItem struct {
-	MailNo string
-	CpCode string
+	MailNo  string
+	CpCode  string
+	Tags    string
+	Remarks string
 }
 
 // ── SSE batch runner ────────────────────────────────
 
-func runSSEBatch(numbers []string, cpCode, proxyAPI string, timeoutSec, concurrency int, batchID string, w http.ResponseWriter, r *http.Request) {
+func runSSEBatch(numbers []string, cpCode, proxyAPI string, timeoutSec, concurrency int, batchID, tags, remarks string, w http.ResponseWriter, r *http.Request) {
 	items := make([]SSEBatchItem, 0, len(numbers))
 	for _, no := range numbers {
-		items = append(items, SSEBatchItem{MailNo: no, CpCode: cpCode})
+		items = append(items, SSEBatchItem{MailNo: no, CpCode: cpCode, Tags: tags, Remarks: remarks})
 	}
 	runSSEBatchItems(items, proxyAPI, timeoutSec, concurrency, batchID, w, r)
 }
@@ -67,10 +69,8 @@ func runSSEBatchItems(items []SSEBatchItem, proxyAPI string, timeoutSec, concurr
 
 	var okCount, failCount, nextIdx int32
 	t0 := time.Now()
-	maxRetries := 3
-	if proxyAPI != "" {
-		maxRetries = 8
-	}
+	maxRetries := 5
+	itemMaxElapsed := 18 * time.Second
 	seen := map[string]bool{}
 
 	// heartbeat — matches Node's setInterval(20000)
@@ -150,11 +150,11 @@ func runSSEBatchItems(items []SSEBatchItem, proxyAPI string, timeoutSec, concurr
 
 		wg.Add(1)
 		sem <- struct{}{}
-		go func(idx int, no, effectiveCp string) {
+		go func(idx int, no, effectiveCp, tags, remarks string) {
 			defer wg.Done()
 			defer func() { <-sem }()
 
-			result, err := queryWithRetry(no, effectiveCp, proxyAPI, timeoutSec*1000, maxRetries, func() bool {
+			result, err := queryWithRetryLimit(no, effectiveCp, proxyAPI, defaultTimeout*1000, maxRetries, itemMaxElapsed, func() bool {
 				return atomic.LoadInt32(&closed) == 1 || ctx.Err() != nil
 			})
 
@@ -165,7 +165,7 @@ func runSSEBatchItems(items []SSEBatchItem, proxyAPI string, timeoutSec, concurr
 					return
 				}
 				eventErr := err.Error()
-				if saveErr := upsertFailed(no, eventErr, batchID); saveErr != nil {
+				if saveErr := upsertFailedWithMetadata(no, eventErr, batchID, tags, remarks); saveErr != nil {
 					eventErr = "保存失败记录失败: " + saveErr.Error() + "；原始错误: " + err.Error()
 				}
 				fail := atomic.AddInt32(&failCount, 1)
@@ -180,7 +180,7 @@ func runSSEBatchItems(items []SSEBatchItem, proxyAPI string, timeoutSec, concurr
 			info := parseResult(result)
 			if info != nil {
 				info.MailNo = no
-				if err := upsertShipment(*info, batchID); err != nil {
+				if err := upsertShipmentWithMetadata(*info, batchID, tags, remarks); err != nil {
 					fail := atomic.AddInt32(&failCount, 1)
 					o := atomic.LoadInt32(&okCount)
 					sendSSE(w, flusher, writeMu, SSEEvent{
@@ -197,7 +197,7 @@ func runSSEBatchItems(items []SSEBatchItem, proxyAPI string, timeoutSec, concurr
 				})
 			} else {
 				eventErr := "无物流数据"
-				if saveErr := upsertFailed(no, eventErr, batchID); saveErr != nil {
+				if saveErr := upsertFailedWithMetadata(no, eventErr, batchID, tags, remarks); saveErr != nil {
 					eventErr = "保存失败记录失败: " + saveErr.Error() + "；原始错误: 无物流数据"
 				}
 				fail := atomic.AddInt32(&failCount, 1)
@@ -207,13 +207,8 @@ func runSSEBatchItems(items []SSEBatchItem, proxyAPI string, timeoutSec, concurr
 					OK: int(o), Fail: int(fail), Total: len(items),
 				})
 			}
-		}(idx, no, effectiveCp)
+		}(idx, no, effectiveCp, item.Tags, item.Remarks)
 
-		// BUG FIX: Node staggers worker startup with sleep(i * 150ms)
-		// Add a small delay between dispatching workers to avoid API burst
-		if i < concurrency-1 {
-			time.Sleep(150 * time.Millisecond)
-		}
 	}
 
 	wg.Wait()

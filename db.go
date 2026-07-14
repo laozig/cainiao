@@ -287,6 +287,10 @@ func normalizeStatusCode(status string) int {
 // ── Upsert ─────────────────────────────────────────
 
 func upsertShipment(p ParsedResult, batchID string) error {
+	return upsertShipmentWithMetadata(p, batchID, "", "")
+}
+
+func upsertShipmentWithMetadata(p ParsedResult, batchID, tags, remarks string) error {
 	sc := normalizeStatusCode(p.Status)
 	if sc == 0 && p.StatusDesc != "" {
 		sc = normalizeStatusCode(p.StatusDesc)
@@ -306,8 +310,8 @@ func upsertShipment(p ParsedResult, batchID string) error {
 
 	q := `INSERT INTO shipments (tracking_number, carrier_code, carrier_name, status, status_code, status_desc,
 		last_track_time, last_track_desc, current_city, from_city, predict, progress, trace_count,
-		result_json, batch_id, request_count, error_msg)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, '')
+		result_json, batch_id, tags, remarks, request_count, error_msg)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, '')
 		ON CONFLICT(tracking_number) DO UPDATE SET
 		carrier_code=excluded.carrier_code,
 		carrier_name=excluded.carrier_name,
@@ -323,24 +327,32 @@ func upsertShipment(p ParsedResult, batchID string) error {
 		trace_count=excluded.trace_count,
 		result_json=excluded.result_json,
 		batch_id=CASE WHEN excluded.batch_id!='' THEN excluded.batch_id ELSE shipments.batch_id END,
+		tags=CASE WHEN excluded.tags!='' THEN excluded.tags ELSE shipments.tags END,
+		remarks=CASE WHEN excluded.remarks!='' THEN excluded.remarks ELSE shipments.remarks END,
 		request_count=shipments.request_count+1,
 		error_msg='',
 		updated_at=datetime('now','localtime')`
 	_, err := mustExecErr(q, p.MailNo, p.CpCode, p.CpName, p.Status, sc, p.StatusDesc,
 		p.LastTime, p.LastDesc, p.Current, p.From,
-		p.Predict, p.Progress, p.TraceCount, resultJSON, batchID)
+		p.Predict, p.Progress, p.TraceCount, resultJSON, batchID, tags, remarks)
 	return err
 }
 
 func upsertFailed(trackingNumber, errorMsg, batchID string) error {
-	q := `INSERT INTO shipments (tracking_number, status_code, error_msg, batch_id, request_count)
-		VALUES (?, 0, ?, ?, 1)
+	return upsertFailedWithMetadata(trackingNumber, errorMsg, batchID, "", "")
+}
+
+func upsertFailedWithMetadata(trackingNumber, errorMsg, batchID, tags, remarks string) error {
+	q := `INSERT INTO shipments (tracking_number, status_code, error_msg, batch_id, tags, remarks, request_count)
+		VALUES (?, 0, ?, ?, ?, ?, 1)
 		ON CONFLICT(tracking_number) DO UPDATE SET
 		error_msg=excluded.error_msg,
 		batch_id=CASE WHEN excluded.batch_id!='' THEN excluded.batch_id ELSE shipments.batch_id END,
+		tags=CASE WHEN excluded.tags!='' THEN excluded.tags ELSE shipments.tags END,
+		remarks=CASE WHEN excluded.remarks!='' THEN excluded.remarks ELSE shipments.remarks END,
 		request_count=shipments.request_count+1,
 		updated_at=datetime('now','localtime')`
-	_, err := mustExecErr(q, trackingNumber, errorMsg, batchID)
+	_, err := mustExecErr(q, trackingNumber, errorMsg, batchID, tags, remarks)
 	return err
 }
 
@@ -959,6 +971,20 @@ func batchRemoveTag(ids []int64, tag string) int {
 		changed++
 	}
 	return changed
+}
+
+func normalizeImportTags(s string) string {
+	parts := splitTags(strings.NewReplacer("，", ",", ";", ",", "；", ",").Replace(s))
+	unique := make([]string, 0, len(parts))
+	seen := make(map[string]struct{}, len(parts))
+	for _, tag := range parts {
+		if _, exists := seen[tag]; exists {
+			continue
+		}
+		seen[tag] = struct{}{}
+		unique = append(unique, tag)
+	}
+	return strings.Join(unique, ",")
 }
 
 func splitTags(s string) []string {

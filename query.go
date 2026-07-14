@@ -99,9 +99,9 @@ func fmtCookies(c map[string]string) string {
 
 func getProxy(apiURL string) (string, error) {
 	if apiURL == "" {
-		return "", nil
+		return "", fmt.Errorf("代理API不能为空")
 	}
-	client := &http.Client{Timeout: 5 * time.Second}
+	client := &http.Client{Timeout: 3 * time.Second}
 	resp, err := client.Get(apiURL)
 	if err != nil {
 		return "", err
@@ -122,10 +122,26 @@ func getProxy(apiURL string) (string, error) {
 		raw = "http://" + raw
 	}
 	u, err := url.Parse(raw)
-	if err != nil {
-		return "", err
+	if err != nil || u.Host == "" {
+		return "", fmt.Errorf("代理地址无效: %s", raw)
 	}
 	return u.String(), nil
+}
+
+func getFreshProxy(apiURL, previous string) (string, bool, error) {
+	const maxPulls = 3
+	var last string
+	for i := 0; i < maxPulls; i++ {
+		proxyURL, err := getProxy(apiURL)
+		if err != nil {
+			return "", false, err
+		}
+		last = proxyURL
+		if previous == "" || proxyURL != previous {
+			return proxyURL, previous != "" && proxyURL != previous, nil
+		}
+	}
+	return last, false, nil
 }
 
 // ── Token fetch ────────────────────────────────────
@@ -346,17 +362,41 @@ func parseResult(data map[string]interface{}) *ParsedResult {
 // ── Query with retry ───────────────────────────────
 
 func queryWithRetry(mailNo, cpCode, proxyAPI string, timeoutMs int, maxRetries int, aborted func() bool) (map[string]interface{}, error) {
-	var lastErr string
+	return queryWithRetryLimit(mailNo, cpCode, proxyAPI, timeoutMs, maxRetries, 0, aborted)
+}
 
-	for i := 0; i < maxRetries; i++ {
+func queryWithRetryLimit(mailNo, cpCode, proxyAPI string, timeoutMs int, maxRetries int, maxElapsed time.Duration, aborted func() bool) (map[string]interface{}, error) {
+	if strings.TrimSpace(proxyAPI) == "" {
+		return nil, fmt.Errorf("代理API不能为空")
+	}
+	timeoutMs = 3000
+	var lastErr string
+	var previousProxy string
+	proxySwitches := 0
+	var deadline time.Time
+	if maxElapsed > 0 {
+		deadline = time.Now().Add(maxElapsed)
+	}
+
+	checkStopped := func() error {
 		if aborted != nil && aborted() {
-			return nil, fmt.Errorf("已取消")
+			return fmt.Errorf("已取消")
+		}
+		if !deadline.IsZero() && time.Now().After(deadline) {
+			return fmt.Errorf("单项处理超时（%s）", maxElapsed.Round(time.Second))
+		}
+		return nil
+	}
+	for i := 0; i < maxRetries; i++ {
+		if err := checkStopped(); err != nil {
+			return nil, err
 		}
 
 		proxyURL := ""
+		proxyChanged := false
 		if proxyAPI != "" {
 			var proxyErr error
-			proxyURL, proxyErr = getProxy(proxyAPI)
+			proxyURL, proxyChanged, proxyErr = getFreshProxy(proxyAPI, previousProxy)
 			if proxyErr != nil || proxyURL == "" {
 				if proxyErr != nil {
 					lastErr = "取代理失败: " + proxyErr.Error()
@@ -364,21 +404,33 @@ func queryWithRetry(mailNo, cpCode, proxyAPI string, timeoutMs int, maxRetries i
 					lastErr = "取代理失败: 空代理"
 				}
 				if i < maxRetries-1 {
-					time.Sleep(time.Duration(min(200*1<<uint(i), 3000)) * time.Millisecond)
+					if err := checkStopped(); err != nil {
+						return nil, err
+					}
 				}
 				continue
 			}
+			if proxyChanged {
+				proxySwitches++
+			}
+			previousProxy = proxyURL
 		}
 
 		tk, err := fetchToken(proxyURL, timeoutMs)
 		if err != nil || tk.Token == "" {
 			if err != nil {
 				lastErr = "取token失败: " + err.Error()
-			} else {
+			} else if proxyAPI == "" {
 				lastErr = "取token失败: 空token"
+			} else if i > 0 && !proxyChanged {
+				lastErr = "取token失败: 空token（代理池重复返回同一代理）"
+			} else {
+				lastErr = "取token失败: 空token（将更换代理重试）"
 			}
 			if i < maxRetries-1 {
-				time.Sleep(time.Duration(min(300*1<<uint(i), 5000)) * time.Millisecond)
+				if err := checkStopped(); err != nil {
+					return nil, err
+				}
 			}
 			continue
 		}
@@ -393,7 +445,9 @@ func queryWithRetry(mailNo, cpCode, proxyAPI string, timeoutMs int, maxRetries i
 				lastErr = lastErr[:120]
 			}
 			if i < maxRetries-1 {
-				time.Sleep(time.Duration(min(500*1<<uint(i), 8000)) * time.Millisecond)
+				if err := checkStopped(); err != nil {
+					return nil, err
+				}
 			}
 			continue
 		}
@@ -421,14 +475,18 @@ func queryWithRetry(mailNo, cpCode, proxyAPI string, timeoutMs int, maxRetries i
 		if hasTokenErr {
 			lastErr = "token无效，已换代理重试"
 			if i < maxRetries-1 {
-				time.Sleep(time.Duration(min(300*1<<uint(i), 5000)) * time.Millisecond)
+				if err := checkStopped(); err != nil {
+					return nil, err
+				}
 			}
 			continue
 		}
 		if hasRgv {
 			lastErr = "限流，已换代理重试"
 			if i < maxRetries-1 {
-				time.Sleep(time.Duration(min(500*1<<uint(i), 8000)) * time.Millisecond)
+				if err := checkStopped(); err != nil {
+					return nil, err
+				}
 			}
 			continue
 		}
@@ -436,23 +494,26 @@ func queryWithRetry(mailNo, cpCode, proxyAPI string, timeoutMs int, maxRetries i
 		return result, nil
 	}
 
+	if proxyAPI != "" {
+		return nil, fmt.Errorf("重试%d次失败（实际更换代理%d次）: %s", maxRetries, proxySwitches, lastErr)
+	}
 	return nil, fmt.Errorf("重试%d次失败: %s", maxRetries, lastErr)
 }
 
 // ── HTTP client with proxy ─────────────────────────
 
 func makeHTTPClient(proxyURL string, timeoutMs int) *http.Client {
-	transport := &http.Transport{}
-	if proxyURL != "" {
-		if pu, err := url.Parse(proxyURL); err == nil {
-			transport.Proxy = http.ProxyURL(pu)
-		}
+	transport := &http.Transport{
+		DisableKeepAlives:     true,
+		TLSHandshakeTimeout:   3 * time.Second,
+		ResponseHeaderTimeout: 3 * time.Second,
+		IdleConnTimeout:       3 * time.Second,
 	}
-	if timeoutMs < 1000 {
-		timeoutMs = 8000
+	if pu, err := url.Parse(proxyURL); err == nil && pu.Host != "" {
+		transport.Proxy = http.ProxyURL(pu)
 	}
 	return &http.Client{
-		Timeout:   time.Duration(timeoutMs) * time.Millisecond,
+		Timeout:   3 * time.Second,
 		Transport: transport,
 	}
 }

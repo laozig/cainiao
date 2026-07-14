@@ -61,13 +61,12 @@ func handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 		jsonMarshalResponse(w, map[string]string{"error": "invalid body"})
 		return
 	}
-	// Node: req.body?.proxyApi || '' — empty string is valid
-	if body.ProxyAPI == "" {
-		// keep whatever was stored, or default
+	if strings.TrimSpace(body.ProxyAPI) == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		jsonMarshalResponse(w, map[string]string{"error": "代理API不能为空"})
+		return
 	}
-	if body.Timeout < 1 || body.Timeout > 30 {
-		body.Timeout = defaultTimeout
-	}
+	body.Timeout = defaultTimeout
 	if body.Concurrency < 1 || body.Concurrency > 20 {
 		body.Concurrency = defaultConc
 	}
@@ -103,13 +102,12 @@ func handleQuery(w http.ResponseWriter, r *http.Request) {
 	if cpCode == "" {
 		cpCode = detectCarrier(body.MailNo)
 	}
-	proxyAPI := getActiveProxyAPI(body.ProxyAPI)
-	timeoutSec := body.Timeout
-	if timeoutSec < 1 || timeoutSec > 30 {
-		timeoutSec = defaultTimeout
+	proxyAPI, ok := requireActiveProxyAPI(w, body.ProxyAPI)
+	if !ok {
+		return
 	}
 
-	result, err := queryWithRetry(body.MailNo, cpCode, proxyAPI, timeoutSec*1000, 5, nil)
+	result, err := queryWithRetry(body.MailNo, cpCode, proxyAPI, defaultTimeout*1000, 5, nil)
 	if err != nil {
 		// Node: res.json({ success: false, error: e.message }) — 200 status
 		jsonMarshalResponse(w, map[string]interface{}{"success": false, "error": err.Error()})
@@ -129,6 +127,8 @@ func handleImport(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Numbers     []string `json:"numbers"`
 		CpCode      string   `json:"cpCode"`
+		Tags        string   `json:"tags"`
+		Remarks     string   `json:"remarks"`
 		ProxyAPI    string   `json:"proxyApi"`
 		Timeout     int      `json:"timeout"`
 		Concurrency int      `json:"concurrency"`
@@ -144,11 +144,11 @@ func handleImport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	proxyAPI := getActiveProxyAPI(body.ProxyAPI)
-	timeoutSec := body.Timeout
-	if timeoutSec < 1 || timeoutSec > 30 {
-		timeoutSec = defaultTimeout
+	proxyAPI, ok := requireActiveProxyAPI(w, body.ProxyAPI)
+	if !ok {
+		return
 	}
+	timeoutSec := defaultTimeout
 	conc := body.Concurrency
 	if conc < 1 || conc > 20 {
 		conc = defaultConc
@@ -156,7 +156,7 @@ func handleImport(w http.ResponseWriter, r *http.Request) {
 
 	// Node: new Date().toISOString().replace(/[T:]/g, '-').slice(0, 19) → "2026-06-30T14-46-50"
 	batchID := time.Now().Format("2006-01-02T15-04-05")
-	runSSEBatch(body.Numbers, body.CpCode, proxyAPI, timeoutSec, conc, batchID, w, r)
+	runSSEBatch(body.Numbers, body.CpCode, proxyAPI, timeoutSec, conc, batchID, normalizeImportTags(body.Tags), strings.TrimSpace(body.Remarks), w, r)
 }
 
 func handleGetRecords(w http.ResponseWriter, r *http.Request) {
@@ -608,11 +608,11 @@ func handleSync(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	proxyAPI := getActiveProxyAPI(body.ProxyAPI)
-	timeoutSec := body.Timeout
-	if timeoutSec < 1 || timeoutSec > 30 {
-		timeoutSec = defaultTimeout
+	proxyAPI, ok := requireActiveProxyAPI(w, body.ProxyAPI)
+	if !ok {
+		return
 	}
+	timeoutSec := defaultTimeout
 	conc := body.Concurrency
 	if conc < 1 || conc > 20 {
 		conc = defaultConc
@@ -650,11 +650,11 @@ func handleSyncFilter(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	proxyAPI := getActiveProxyAPI(body.ProxyAPI)
-	timeoutSec := body.Timeout
-	if timeoutSec < 1 || timeoutSec > 30 {
-		timeoutSec = defaultTimeout
+	proxyAPI, ok := requireActiveProxyAPI(w, body.ProxyAPI)
+	if !ok {
+		return
 	}
+	timeoutSec := defaultTimeout
 	conc := body.Concurrency
 	if conc < 1 || conc > 20 {
 		conc = defaultConc
@@ -681,11 +681,11 @@ func handleSyncMonitoring(w http.ResponseWriter, r *http.Request) {
 	}
 	jsonDecodeBody(r, &body)
 
-	proxyAPI := getActiveProxyAPI(body.ProxyAPI)
-	timeoutSec := body.Timeout
-	if timeoutSec < 1 || timeoutSec > 30 {
-		timeoutSec = defaultTimeout
+	proxyAPI, ok := requireActiveProxyAPI(w, body.ProxyAPI)
+	if !ok {
+		return
 	}
+	timeoutSec := defaultTimeout
 	conc := body.Concurrency
 	if conc < 1 || conc > 20 {
 		conc = defaultConc
@@ -758,7 +758,17 @@ func getActiveProxyAPI(custom string) string {
 	if v := strings.TrimSpace(custom); v != "" {
 		return v
 	}
-	return getSetting("proxyApi", "")
+	return strings.TrimSpace(getSetting("proxyApi", ""))
+}
+
+func requireActiveProxyAPI(w http.ResponseWriter, custom string) (string, bool) {
+	proxyAPI := getActiveProxyAPI(custom)
+	if proxyAPI != "" {
+		return proxyAPI, true
+	}
+	w.WriteHeader(http.StatusBadRequest)
+	jsonMarshalResponse(w, map[string]string{"error": "请先设置代理API，查询、导入和同步必须使用代理"})
+	return "", false
 }
 
 // BUG FIX: getPathParam was fragile — only found last numeric segment.

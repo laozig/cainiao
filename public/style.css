@@ -164,8 +164,11 @@ body { font-family:var(--font); background:var(--bg); color:var(--text); font-si
 .import-textarea:focus { border-color:var(--pri); }
 .import-row { display:flex; gap:8px; margin-top:8px; align-items:flex-end; flex-wrap:wrap; }
 .import-field { display:flex; flex-direction:column; gap:2px; }
+.import-field-wide { flex:1; min-width:220px; }
 .import-field label { font-size:10px; color:var(--text2); font-weight:500; }
-.import-field input { height:28px; border:1px solid var(--border); border-radius:4px; padding:0 6px; font-size:11px; }
+.import-field input { height:28px; border:1px solid var(--border); border-radius:4px; padding:0 6px; font-size:11px; background:var(--input-bg); color:var(--text); }
+.import-field-wide input { width:100%; }
+.import-field input:focus { border-color:var(--pri); outline:none; }
 .import-field input[type=number] { width:70px; }
 .import-count { font-size:11px; color:var(--text2); margin-top:4px; }
 .import-upload { margin-top:6px; }

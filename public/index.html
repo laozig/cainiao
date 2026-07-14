@@ -30,10 +30,10 @@
 
   <div class="settings-bar" id="settingsBar">
     <label>代理API</label>
-    <input type="text" class="proxy-input" id="globalProxyApi" placeholder="代理提取API，留空不使用">
+    <input type="text" class="proxy-input" id="globalProxyApi" placeholder="必填：每次失败自动提取新代理">
     <span class="proxy-status" id="proxyStatus"></span>
     <div class="settings-sep"></div>
-    <label>超时</label><input type="number" id="cfgTimeout" value="3" min="1" max="30">
+    <label>超时</label><input type="number" id="cfgTimeout" value="3" min="3" max="3" disabled title="固定3秒，超时立即更换代理">
     <label>并发</label><input type="number" id="cfgConcurrency" value="5" min="1" max="20">
     <div class="settings-sep"></div>
     <label class="check-line"><input type="checkbox" id="autoSyncEnabled"> 自动同步</label>
@@ -121,6 +121,8 @@
       <div class="import-count" id="importCount">0 个单号</div>
       <div class="import-row">
         <div class="import-field"><label>快递编码</label><input type="text" id="importCpCode" placeholder="留空自动识别" style="width:120px"></div>
+        <div class="import-field"><label>本批标签</label><input type="text" id="importTags" placeholder="多个标签用逗号分隔" style="width:180px"></div>
+        <div class="import-field import-field-wide"><label>本批备注</label><input type="text" id="importRemarks" placeholder="应用到本批全部运单"></div>
       </div>
       <div class="progress-section hidden" id="importProgress">
         <div class="progress-bar"><div class="progress-fill" id="importProgressFill"></div></div>
